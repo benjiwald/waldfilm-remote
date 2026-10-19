@@ -1159,7 +1159,7 @@ fn get_api_server_(api: String, custom: String) -> String {
             return format!("http://{}", s);
         }
     }
-    "https://admin.rustdesk.com".to_owned()
+    WALDFILM_API_SERVER.to_owned()
 }
 
 #[inline]
@@ -2357,7 +2357,25 @@ pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
     ThrottledInterval::new(i)
 }
 
+// Waldfilm Remote: built-in server defaults (users may still override them in the settings).
+pub const WALDFILM_RENDEZVOUS_SERVER: &str = "remote.waldfilm.at";
+pub const WALDFILM_RELAY_SERVER: &str = "remote.waldfilm.at:21117";
+pub const WALDFILM_API_SERVER: &str = "https://remote.waldfilm.at";
+
+fn load_waldfilm_defaults() {
+    let mut settings = config::DEFAULT_SETTINGS.write().unwrap();
+    for (k, v) in [
+        ("custom-rendezvous-server", WALDFILM_RENDEZVOUS_SERVER),
+        ("relay-server", WALDFILM_RELAY_SERVER),
+        ("api-server", WALDFILM_API_SERVER),
+        ("key", config::RS_PUB_KEY),
+    ] {
+        settings.entry(k.to_owned()).or_insert_with(|| v.to_owned());
+    }
+}
+
 pub fn load_custom_client() {
+    load_waldfilm_defaults();
     #[cfg(debug_assertions)]
     if let Ok(data) = std::fs::read_to_string("./custom.txt") {
         read_custom_client(data.trim());
