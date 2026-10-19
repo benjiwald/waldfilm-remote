@@ -258,6 +258,8 @@ pub fn translate_locale(name: String, locale: &str) -> String {
                 let app_name = crate::get_app_name();
                 if app_name == "WaldfilmRemote" {
                     s = s.replace("RustDesk", "Waldfilm Remote");
+                } else if app_name == "WaldfilmSupport" {
+                    s = s.replace("RustDesk", "Waldfilm Support");
                 } else if !app_name.contains("RustDesk") {
                     s = s.replace("RustDesk", &app_name);
                 } else {

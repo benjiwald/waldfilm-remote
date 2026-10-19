@@ -1,9 +1,17 @@
-# Waldfilm Remote: Windows x64 build only (derived from flutter-build.yml, job build-for-windows-flutter).
+# Waldfilm Remote / Waldfilm Support: Windows x64 builds (derived from flutter-build.yml, job build-for-windows-flutter).
+# Variants: "remote" = Waldfilm Remote (team, full features); "support" = Waldfilm Support
+# (customer, incoming only; compiled with env WALDFILM_SUPPORT=1, icons from res/waldfilm-support/overlay).
 # Start: gh workflow run waldfilm-windows.yml -R benjiwald/waldfilm-remote --ref waldfilm
 name: Waldfilm Remote Windows x64
 
 on:
   workflow_dispatch:
+    inputs:
+      variants:
+        description: "Variants to build: both | remote | support"
+        type: choice
+        options: [both, remote, support]
+        default: both
 
 env:
   SCITER_RUST_VERSION: "1.75"
@@ -12,8 +20,6 @@ env:
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
   VERSION: "1.5.0"
-  APP_NAME: "WaldfilmRemote"
-  OUT_NAME: "waldfilm-remote"
 
 jobs:
   generate-bridge:
@@ -29,9 +35,17 @@ jobs:
       target_version: Windows10
 
   build-windows-x64:
-    name: x86_64-pc-windows-msvc
+    name: ${{ matrix.variant }}-x86_64-pc-windows-msvc
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(inputs.variants == 'remote' && '["remote"]' || inputs.variants == 'support' && '["support"]' || '["remote","support"]') }}
+    env:
+      APP_NAME: ${{ matrix.variant == 'support' && 'WaldfilmSupport' || 'WaldfilmRemote' }}
+      OUT_NAME: ${{ matrix.variant == 'support' && 'waldfilm-support' || 'waldfilm-remote' }}
+      MSI_ARGS: ${{ matrix.variant == 'support' && '--conn-type incoming' || '' }}
     steps:
       - name: Export GitHub Actions cache environment variables
         uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
@@ -44,6 +58,16 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: recursive
+
+      - name: Apply Waldfilm Support variant
+        if: ${{ matrix.variant == 'support' }}
+        shell: bash
+        run: |
+          echo "WALDFILM_SUPPORT=1" >> "$GITHUB_ENV"
+          cp -rv res/waldfilm-support/overlay/. .
+          sed -i 's/Waldfilm Remote/Waldfilm Support/g; s/"waldfilm-remote"/"waldfilm-support"/g' flutter/windows/runner/Runner.rc Cargo.toml libs/portable/Cargo.toml
+          sed -i 's/at.waldfilm.remote/at.waldfilm.support/' Cargo.toml
+          grep -n "Waldfilm" flutter/windows/runner/Runner.rc Cargo.toml libs/portable/Cargo.toml
 
       - name: Restore bridge files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -89,7 +113,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          prefix-key: windows-2022
+          prefix-key: windows-2022-${{ matrix.variant }}
 
       - name: Setup vcpkg with Github Actions binary cache
         uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
@@ -174,7 +198,7 @@ jobs:
       - name: Upload unpacked app folder
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: waldfilm-remote-unpacked-windows-x86_64
+          name: ${{ env.OUT_NAME }}-unpacked-windows-x86_64
           path: rustdesk
 
       - name: Build self-extracted executable
@@ -197,7 +221,7 @@ jobs:
         continue-on-error: true
         run: |
           pushd ./res/msi
-          python preprocess.py --arp -d ../../rustdesk --app-name ${{ env.APP_NAME }} -m Waldfilm
+          python preprocess.py --arp -d ../../rustdesk --app-name ${{ env.APP_NAME }} -m Waldfilm ${{ env.MSI_ARGS }}
           nuget restore msi.sln
           msbuild msi.sln -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
           $msi = Get-ChildItem ./Package/bin/*/Release/en-us/Package.msi | Select-Object -First 1
@@ -212,5 +236,5 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: waldfilm-remote-${{ env.VERSION }}-windows-x86_64
+          name: ${{ env.OUT_NAME }}-${{ env.VERSION }}-windows-x86_64
           path: ./SignOutput

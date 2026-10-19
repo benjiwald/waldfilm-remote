@@ -2372,6 +2372,33 @@ fn load_waldfilm_defaults() {
     ] {
         settings.entry(k.to_owned()).or_insert_with(|| v.to_owned());
     }
+    drop(settings);
+    if config::WALDFILM_SUPPORT {
+        // "Waldfilm Support": customer variant, incoming connections only, no account,
+        // no address book, no settings UI. Equivalent to the custom-client options
+        // of the RustDesk Pro generator, but compiled in.
+        let mut hard = config::HARD_SETTINGS.write().unwrap();
+        for (k, v) in [
+            ("conn-type", "incoming"),
+            ("disable-settings", "Y"),
+            ("disable-account", "Y"),
+            ("disable-ab", "Y"),
+        ] {
+            hard.insert(k.to_owned(), v.to_owned());
+        }
+        drop(hard);
+        let mut builtin = config::BUILTIN_SETTINGS.write().unwrap();
+        for (k, v) in [
+            // Allows the technician to run `--password <pw>` as admin after installation.
+            (keys::OPTION_ALLOW_COMMAND_LINE_SETTINGS_WHEN_SETTINGS_DISABLED, "Y"),
+            (keys::OPTION_HIDE_NETWORK_SETTINGS, "Y"),
+            (keys::OPTION_HIDE_SERVER_SETTINGS, "Y"),
+            (keys::OPTION_HIDE_PROXY_SETTINGS, "Y"),
+            (keys::OPTION_HIDE_WEBSOCKET_SETTINGS, "Y"),
+        ] {
+            builtin.insert(k.to_owned(), v.to_owned());
+        }
+    }
 }
 
 pub fn load_custom_client() {
