@@ -279,10 +279,14 @@ impl RendezvousMediator {
             }
         }
         crate::hbbs_http::sync::start();
+        // Waldfilm: the upstream RustDesk auto update would replace this custom client with
+        // stock RustDesk, so it is not started. Waldfilm's own signed updater runs instead.
         #[cfg(target_os = "windows")]
-        if crate::platform::is_installed() && crate::is_server() {
+        if crate::platform::is_installed() && crate::is_server() && !crate::is_custom_client() {
             crate::updater::start_auto_update();
         }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        crate::waldfilm::start();
         check_zombie();
         let server = new_server();
         if config::option2bool("stop-service", &Config::get_option("stop-service")) {

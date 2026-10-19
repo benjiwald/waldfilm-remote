@@ -59,6 +59,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Read Waldfilm version
+        shell: bash
+        run: |
+          WVER=$(sed -n 's/^pub const WALDFILM_VERSION: &str = "\(.*\)";/\1/p' src/waldfilm.rs)
+          test -n "$WVER"
+          echo "WVER=$WVER" >> "$GITHUB_ENV"
+          echo "Waldfilm version: $WVER"
+
       - name: Apply Waldfilm Support variant
         if: ${{ matrix.variant == 'support' }}
         shell: bash
@@ -205,7 +213,7 @@ jobs:
           python3 ./generate.py -f ../../rustdesk/ -o . -e ../../rustdesk/${{ env.APP_NAME }}.exe
           popd
           mkdir -p ./SignOutput
-          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/${{ env.OUT_NAME }}-${{ env.VERSION }}-x86_64.exe
+          mv ./target/release/rustdesk-portable-packer.exe ./SignOutput/${{ env.OUT_NAME }}-${{ env.WVER }}-x86_64.exe
 
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
@@ -220,7 +228,7 @@ jobs:
           nuget restore msi.sln
           msbuild msi.sln -p:Configuration=Release -p:Platform=x64 /p:TargetVersion=Windows10
           $msi = Get-ChildItem ./Package/bin/*/Release/en-us/Package.msi | Select-Object -First 1
-          mv $msi.FullName ../../SignOutput/${{ env.OUT_NAME }}-${{ env.VERSION }}-x86_64.msi
+          mv $msi.FullName ../../SignOutput/${{ env.OUT_NAME }}-${{ env.WVER }}-x86_64.msi
           popd
 
       - name: Checksums
@@ -231,5 +239,5 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ env.OUT_NAME }}-${{ env.VERSION }}-windows-x86_64
+          name: ${{ env.OUT_NAME }}-${{ env.WVER }}-windows-x86_64
           path: ./SignOutput
