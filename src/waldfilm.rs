@@ -177,12 +177,14 @@ fn enroll_once(id: &str) -> Result<String, EnrollError> {
         return Ok(hash_fingerprint(&hash));
     }
     if status.as_u16() == 403 {
+        let short: String = text.chars().take(200).collect();
         log::warn!(
             "Waldfilm enroll: rejected with 403 (uuid / not registered?): {}",
-            text
+            short
         );
     }
-    Err(EnrollError::Retry(format!("HTTP {}: {}", status, text)))
+    let short: String = text.chars().take(200).collect();
+    Err(EnrollError::Retry(format!("HTTP {}: {}", status, short)))
 }
 
 fn enroll_loop() {
@@ -347,34 +349,113 @@ fn check_manifest() -> ResultType<Option<UpdateFile>> {
     }))
 }
 
-fn download_verified(f: &UpdateFile) -> ResultType<std::path::PathBuf> {
+/// Staging directory for downloaded installers (Windows).
+///
+/// `%ProgramFiles%\Waldfilm\<AppName>-update`: below Program Files, so normal users can
+/// neither pre-create it nor write into its parent. On every use it is checked not to be a
+/// reparse point (junction/symlink) and its DACL is reset to SYSTEM + Administrators full
+/// control only, inheritance removed, owner Administrators.
+#[cfg(windows)]
+fn staging_dir() -> ResultType<std::path::PathBuf> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_owned());
+    let pf = std::path::PathBuf::from(pf);
+    if !pf.is_absolute() || !pf.is_dir() {
+        bail!("ProgramFiles is not usable: {:?}", pf);
+    }
+    let parent = pf.join("Waldfilm");
+    let dir = parent.join(format!("{}-update", crate::get_app_name()));
+    for d in [&parent, &dir] {
+        match std::fs::symlink_metadata(d) {
+            Ok(m) => {
+                if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !m.is_dir() {
+                    bail!("staging path {:?} is a reparse point or not a directory", d);
+                }
+            }
+            Err(_) => std::fs::create_dir(d)?,
+        }
+    }
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
+    let icacls = std::path::PathBuf::from(system_root).join("System32").join("icacls.exe");
+    let status = std::process::Command::new(&icacls)
+        .arg(&dir)
+        .args([
+            "/inheritance:r",
+            "/grant:r",
+            "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F",
+            "/setowner",
+            "*S-1-5-32-544",
+            "/Q",
+        ])
+        .status()?;
+    if !status.success() {
+        bail!("icacls failed on {:?}: {}", dir, status);
+    }
+    // the ACL change must not have been redirected through a link
+    let m = std::fs::symlink_metadata(&dir)?;
+    if m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !m.is_dir() {
+        bail!("staging path {:?} changed into a reparse point", dir);
+    }
+    Ok(dir)
+}
+
+/// Removes leftovers of earlier updates (the installer cannot be deleted while it runs).
+#[cfg(windows)]
+fn cleanup_staging() {
+    if let Ok(dir) = staging_dir() {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                    std::fs::remove_file(e.path()).ok();
+                }
+            }
+        }
+    }
+}
+
+/// Downloads the installer, checks its SHA256 in memory, writes it with `create_new` under a
+/// random name into the protected staging dir and returns the path plus a read handle that
+/// only shares READ (no write/delete). The handle must be kept open until the installer has
+/// been started, so the file cannot be replaced between the check and the start.
+#[cfg(windows)]
+fn download_verified(f: &UpdateFile) -> ResultType<(std::path::PathBuf, std::fs::File)> {
+    use std::io::{Read, Write};
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
     let data = http_get(&f.url)?;
     let digest = Sha256::digest(&data);
     let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
     if hex != f.sha256 {
         bail!("sha256 mismatch for {}: got {}", f.url, hex);
     }
-    let ext = if cfg!(windows) { "exe" } else { "dmg" };
-    let dir = std::env::temp_dir().join("waldfilm-update");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!(
-        "{}-{}-build{}.{}",
-        crate::get_app_name().to_lowercase(),
-        platform_key(),
-        f.build,
-        ext
-    ));
-    if path.exists() {
-        std::fs::remove_file(&path)?;
+    let dir = staging_dir()?;
+    let mut rnd = [0u8; 12];
+    hbb_common::sodiumoxide::randombytes::randombytes_into(&mut rnd);
+    let name: String = rnd.iter().map(|b| format!("{:02x}", b)).collect();
+    let path = dir.join(format!("setup-build{}-{}.exe", f.build, name));
+    {
+        let mut w = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)?;
+        w.write_all(&data)?;
+        w.sync_all()?;
     }
-    std::fs::write(&path, &data)?;
-    // re-check what is on disk right before using it
-    let on_disk = std::fs::read(&path)?;
+    let mut r = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&path)?;
+    let mut on_disk = Vec::with_capacity(data.len());
+    r.read_to_end(&mut on_disk)?;
     if Sha256::digest(&on_disk)[..] != digest[..] {
+        drop(r);
         std::fs::remove_file(&path).ok();
-        bail!("file changed on disk after download");
+        bail!("installer changed on disk after writing");
     }
-    Ok(path)
+    Ok((path, r))
 }
 
 #[cfg(windows)]
@@ -437,34 +518,40 @@ fn update_check_once() -> Duration {
 
 #[cfg(windows)]
 fn apply_update(f: &UpdateFile) -> Duration {
+    cleanup_staging();
     if !crate::updater::has_no_active_conns() {
         log::info!("Waldfilm update: active connection, postponing");
         return UPDATE_RETRY_BUSY;
     }
-    let path = match download_verified(f) {
-        Ok(p) => p,
+    let (path, guard) = match download_verified(f) {
+        Ok(x) => x,
         Err(e) => {
             log::warn!("Waldfilm update download failed: {}", e);
             return UPDATE_RETRY_BUSY;
         }
     };
     if !crate::updater::has_no_active_conns() {
+        drop(guard);
         std::fs::remove_file(&path).ok();
         return UPDATE_RETRY_BUSY;
     }
-    if let Err(e) = install_update(&path, f) {
+    let res = install_update(&path, f);
+    // keep the read-only, no-write/no-delete-share handle until the installer process has
+    // started and opened the image
+    std::thread::sleep(Duration::from_secs(5));
+    drop(guard);
+    if let Err(e) = res {
         log::error!("Waldfilm update install failed: {}", e);
         std::fs::remove_file(&path).ok();
     }
-    // If the update succeeds, this process is replaced by the new version. If it does not,
-    // the old version keeps running and checks again at the next interval.
+    // On success the installer replaces this process; the file is removed by cleanup_staging()
+    // of the next run. On failure the old version keeps running and retries after the interval.
     UPDATE_INTERVAL
 }
 
 #[cfg(not(windows))]
 fn apply_update(f: &UpdateFile) -> Duration {
-    // macOS: notify only (the dmg has to be installed manually for now).
-    let _ = download_verified;
+    // macOS: notify only. Nothing is downloaded, so there is no staging file.
     let _ = UPDATE_RETRY_BUSY;
     log::warn!(
         "Waldfilm update: new version {} (build {}) available, please install {} manually",
